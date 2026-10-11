@@ -46,7 +46,7 @@ New-Item -ItemType Directory -Force -Path $site | Out-Null
 & python -m pip install --target $site --upgrade --disable-pip-version-check --quiet cryptography
 
 Write-Host "Copying omotam files..."
-foreach ($f in 'dns_server.py', 'dns_mcp.py', 'intercept_mode.ps1', 'update.ps1', 'uninstall.ps1', 'dns_hosts.example.json') {
+foreach ($f in 'dns_server.py', 'dns_mcp.py', 'intercept_mode.ps1', 'update.ps1', 'uninstall.ps1', 'tray.ps1', 'dns_hosts.example.json') {
     Copy-Item -LiteralPath (Join-Path $root $f) -Destination $payload -Force
 }
 

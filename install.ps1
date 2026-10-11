@@ -18,6 +18,8 @@ param(
     [string]$TaskName = 'omotam',
     [switch]$Service,
     [switch]$NoService,
+    [switch]$Tray,
+    [switch]$NoTray,
     [switch]$Mcp,
     [switch]$NoMcp,
     [switch]$Tls,
@@ -40,6 +42,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administra
     if ($RuntimeUrl) { $argsList += @('-RuntimeUrl', "`"$RuntimeUrl`"") }
     if ($Service) { $argsList += '-Service' }
     if ($NoService) { $argsList += '-NoService' }
+    if ($Tray) { $argsList += '-Tray' }
+    if ($NoTray) { $argsList += '-NoTray' }
     if ($Mcp) { $argsList += '-Mcp' }
     if ($NoMcp) { $argsList += '-NoMcp' }
     if ($Tls) { $argsList += '-Tls' }
@@ -100,6 +104,27 @@ function Set-OmotamMcpConfig($dir) {
 
 function Get-ConfigValue($cfg, $key, $default) {
     if ($cfg.PSObject.Properties[$key]) { return $cfg.$key } else { return $default }
+}
+
+function Register-TrayTask($dir, $trayTask) {
+    $user = if ($env:USERDOMAIN) { "$env:USERDOMAIN\$env:USERNAME" } else { $env:USERNAME }
+    $tray = Join-Path $dir 'tray.ps1'
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+        -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tray`""
+    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
+    Register-ScheduledTask -TaskName $trayTask -Action $action -Trigger $trigger `
+        -Principal $principal -Settings $settings -Description 'Omotam tray icon' -Force | Out-Null
+    Start-ScheduledTask -TaskName $trayTask -ErrorAction SilentlyContinue
+}
+
+function Remove-TrayTask($trayTask) {
+    if (Get-ScheduledTask -TaskName $trayTask -ErrorAction SilentlyContinue) {
+        Stop-ScheduledTask -TaskName $trayTask -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $trayTask -Confirm:$false
+    }
 }
 
 # ---------------------------------------------------------------- install core
@@ -187,6 +212,11 @@ function Invoke-OmotamInstall($opts, $status) {
         Start-ScheduledTask -TaskName $TaskName
     }
 
+    if ($opts.Tray) {
+        & $status "Registering tray icon ..."
+        try { Register-TrayTask $dir 'omotam-tray' } catch { & $status "Tray warning: $($_.Exception.Message)" }
+    }
+
     if ($opts.Mcp) {
         & $status "Registering opencode MCP ..."
         try { Set-OmotamMcpConfig $dir } catch { & $status "MCP config warning: $($_.Exception.Message)" }
@@ -198,6 +228,7 @@ function Invoke-OmotamInstall($opts, $status) {
 
 function Invoke-OmotamUninstall($status) {
     & $status "Stopping service ..."
+    Remove-TrayTask 'omotam-tray'
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
         Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
@@ -221,6 +252,7 @@ if ($Silent) {
         InstallDir     = $InstallDir
         RuntimeUrl     = $RuntimeUrl
         Service        = -not $NoService -and ($Service -or -not ($Service -or $NoService))
+        Tray           = -not $NoTray -and ($Tray -or -not ($Tray -or $NoTray))
         Mcp            = -not $NoMcp -and ($Mcp -or -not ($Mcp -or $NoMcp))
         Tls            = -not $NoTls -and ($Tls -or -not ($Tls -or $NoTls))
         KeepRuntime    = [bool]$KeepRuntime
@@ -245,7 +277,7 @@ Add-Type -AssemblyName System.Drawing
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'omotam Setup'
-$form.Size = New-Object System.Drawing.Size(470, 400)
+$form.Size = New-Object System.Drawing.Size(470, 440)
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
@@ -296,7 +328,7 @@ $form.Controls.Add($btnBrowse)
 $grp = New-Object System.Windows.Forms.GroupBox
 $grp.Text = 'Options'
 $grp.Location = New-Object System.Drawing.Point(16, ($y + 54))
-$grp.Size = New-Object System.Drawing.Size(420, 130)
+$grp.Size = New-Object System.Drawing.Size(420, 158)
 $form.Controls.Add($grp)
 
 $chkService = New-Object System.Windows.Forms.CheckBox
@@ -306,35 +338,42 @@ $chkService.Size = New-Object System.Drawing.Size(395, 20)
 $chkService.Checked = $true
 $grp.Controls.Add($chkService)
 
+$chkTray = New-Object System.Windows.Forms.CheckBox
+$chkTray.Text = 'Add the Omotam tray icon (on/off, opens the UI)'
+$chkTray.Location = New-Object System.Drawing.Point(12, 48)
+$chkTray.Size = New-Object System.Drawing.Size(395, 20)
+$chkTray.Checked = $true
+$grp.Controls.Add($chkTray)
+
 $chkMcp = New-Object System.Windows.Forms.CheckBox
 $chkMcp.Text = 'Register omotam MCP server in opencode'
-$chkMcp.Location = New-Object System.Drawing.Point(12, 48)
+$chkMcp.Location = New-Object System.Drawing.Point(12, 74)
 $chkMcp.Size = New-Object System.Drawing.Size(395, 20)
 $chkMcp.Checked = $true
 $grp.Controls.Add($chkMcp)
 
 $chkTls = New-Object System.Windows.Forms.CheckBox
 $chkTls.Text = 'Enable HTTPS (dns.settings) and trust the local certificate'
-$chkTls.Location = New-Object System.Drawing.Point(12, 74)
+$chkTls.Location = New-Object System.Drawing.Point(12, 100)
 $chkTls.Size = New-Object System.Drawing.Size(395, 20)
 $chkTls.Checked = $true
 $grp.Controls.Add($chkTls)
 
 $chkRec = New-Object System.Windows.Forms.CheckBox
 $chkRec.Text = 'Record DNS requests (off by default; can be enabled later in the GUI)'
-$chkRec.Location = New-Object System.Drawing.Point(12, 100)
+$chkRec.Location = New-Object System.Drawing.Point(12, 126)
 $chkRec.Size = New-Object System.Drawing.Size(395, 20)
 $chkRec.Checked = $false
 $grp.Controls.Add($chkRec)
 
 $lblStatus = New-Object System.Windows.Forms.Label
-$lblStatus.Location = New-Object System.Drawing.Point(16, ($y + 192))
+$lblStatus.Location = New-Object System.Drawing.Point(16, ($y + 220))
 $lblStatus.Size = New-Object System.Drawing.Size(420, 20)
 $lblStatus.Text = 'Ready to install.'
 $form.Controls.Add($lblStatus)
 
 $progress = New-Object System.Windows.Forms.ProgressBar
-$progress.Location = New-Object System.Drawing.Point(16, ($y + 214))
+$progress.Location = New-Object System.Drawing.Point(16, ($y + 242))
 $progress.Size = New-Object System.Drawing.Size(420, 16)
 $progress.Style = 'Marquee'
 $progress.MarqueeAnimationSpeed = 0
@@ -368,6 +407,7 @@ $btnInstall.Add_Click({
             InstallDir    = $txtDir.Text
             RuntimeUrl    = $RuntimeUrl
             Service       = $chkService.Checked
+            Tray          = $chkTray.Checked
             Mcp           = $chkMcp.Checked
             Tls           = $chkTls.Checked
             KeepRuntime   = [bool]$KeepRuntime

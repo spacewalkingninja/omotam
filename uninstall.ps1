@@ -26,10 +26,12 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administra
     return
 }
 
-if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-    Write-Host "Removed scheduled task '$TaskName'."
+foreach ($tn in @($TaskName, 'omotam-tray')) {
+    if (Get-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue) {
+        Stop-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $tn -Confirm:$false
+        Write-Host "Removed scheduled task '$tn'."
+    }
 }
 
 foreach ($n in 'omotam DNS (UDP)', 'omotam DNS (TCP)', 'omotam GUI (HTTP)', 'omotam GUI (HTTPS)') {
