@@ -1,0 +1,29 @@
+{
+  "upstream": "1.1.1.1",
+  "upstream_port": 53,
+  "port": 53,
+  "bind": "0.0.0.0",
+  "ttl": 60,
+  "gui_enabled": true,
+  "gui_bind": "0.0.0.0",
+  "gui_port": 8080,
+  "gui_tls": true,
+  "gui_tls_port": 443,
+  "gui_hostname": "dns.settings",
+  "gui_cert": "dns.settings.crt",
+  "gui_key": "dns.settings.key",
+  "gui_ca": "dns.settings-ca.crt",
+  "gui_token": null,
+  "api_token": null,
+  "intercept_enabled": false,
+  "intercept_ips": ["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4"],
+  "intercept_upstream": "9.9.9.10",
+  "record_queries": false,
+  "records": {
+    "example.local": "192.168.1.50",
+    "*.home.lan": {"A": "192.168.1.60", "AAAA": "fd00::60"},
+    "blocked.example.com": "BLOCK",
+    "alias.example.local": {"CNAME": "example.local"},
+    "myexample.com": {"TXT": "hello-world", "merge": true}
+  }
+}

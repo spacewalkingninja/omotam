@@ -1,0 +1,18 @@
+# Runtime / personal state (never commit)
+dns_hosts.json
+dns_activity.txt
+*.crt
+*.key
+*.log
+
+# Build artifacts
+dist/
+*.b64
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+
+# Test scratch
+test_*
