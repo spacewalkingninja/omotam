@@ -49,7 +49,7 @@ LOG_TOTAL = 0
 QUERY_LOG = collections.deque(maxlen=50000)
 QUERY_LOCK = threading.Lock()
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 REPO = "spacewalkingninja/omotam"
 UPDATE_CACHE = {"ts": 0.0, "result": None}
 UPDATE_LOCK = threading.Lock()
@@ -287,7 +287,42 @@ def resolve_paths(config, config_path):
         "key": rp(config.get("gui_key", "dns.settings.key")),
         "ca": rp(config.get("gui_ca", "dns.settings-ca.crt")),
         "ca_key": rp(config.get("gui_ca_key", "dns.settings-ca.key")),
+        "crl": rp(config.get("gui_crl", "dns.settings")),
     }
+
+
+def _http_bases(config, paths):
+    """http:// base URLs (no auth) clients can use to fetch CRL/OCSP."""
+    port = int(config.get("gui_port", 8080))
+    candidates = []
+    if paths["hostnames"]:
+        candidates.append(paths["hostnames"][0])
+    candidates.append("127.0.0.1")
+    ip = detect_lan_ip(config.get("intercept_ips"))
+    if ip and ip != "127.0.0.1":
+        candidates.append(ip)
+    out, seen = [], set()
+    for host in candidates:
+        base = "http://{}:{}".format(host, port)
+        if base not in seen:
+            seen.add(base)
+            out.append(base)
+    return out
+
+
+def revocation_urls(config, paths):
+    bases = _http_bases(config, paths)
+    crl_urls = []
+    if config.get("gui_crl_url"):
+        crl_urls = [str(config["gui_crl_url"])]
+    elif config.get("revocation_crl", True):
+        crl_urls = [b + "/crl" for b in bases]
+    ocsp_url = None
+    if config.get("gui_ocsp_url"):
+        ocsp_url = str(config["gui_ocsp_url"])
+    elif config.get("revocation_ocsp", False):
+        ocsp_url = bases[0] + "/ocsp"
+    return crl_urls, ocsp_url
 
 
 def _load_ca_key(ca_key_path):
@@ -319,15 +354,17 @@ def _trust_ca(ca_path):
         log("could not trust CA automatically (import it manually): {}".format(exc))
 
 
-def generate_certificates(cert_path, key_path, ca_path, hostnames, ca_key_path=None):
+def generate_certificates(cert_path, key_path, ca_path, hostnames, ca_key_path=None,
+                          crl_urls=None, ocsp_url=None):
     """Issue a leaf cert (chained to a local CA) for the hostnames.
 
     Reuses an existing CA key/cert when present so trust is preserved.
+    Optionally advertises a CRL distribution point and/or an OCSP responder.
     Returns True when a brand-new CA was created."""
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
+    from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID, AuthorityInformationAccessOID
 
     if ca_key_path is None:
         ca_key_path = ca_path + ".key"
@@ -371,7 +408,8 @@ def generate_certificates(cert_path, key_path, ca_path, hostnames, ca_key_path=N
     san_ips = [x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
     if ip != "127.0.0.1":
         san_ips.append(x509.IPAddress(ipaddress.ip_address(ip)))
-    leaf_cert = (
+
+    builder = (
         x509.CertificateBuilder()
         .subject_name(leaf_name).issuer_name(ca_name)
         .public_key(leaf_key.public_key())
@@ -382,8 +420,20 @@ def generate_certificates(cert_path, key_path, ca_path, hostnames, ca_key_path=N
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(x509.KeyUsage(True, False, True, False, False, False, False, False, False), critical=True)
         .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
-        .sign(ca_key, hashes.SHA256())
     )
+    if crl_urls:
+        points = [x509.DistributionPoint(full_name=[x509.UniformResourceIdentifier(u)],
+                                         relative_name=None, reasons=None, crl_issuer=None)
+                  for u in crl_urls]
+        builder = builder.add_extension(x509.CRLDistributionPoints(points), critical=False)
+    if ocsp_url:
+        builder = builder.add_extension(
+            x509.AuthorityInformationAccess([
+                x509.AccessDescription(AuthorityInformationAccessOID.OCSP,
+                                       x509.UniformResourceIdentifier(ocsp_url))
+            ]), critical=False)
+
+    leaf_cert = builder.sign(ca_key, hashes.SHA256())
     with open(cert_path, "wb") as fh:
         fh.write(leaf_cert.public_bytes(pem))
         fh.write(ca_cert.public_bytes(pem))
@@ -392,7 +442,69 @@ def generate_certificates(cert_path, key_path, ca_path, hostnames, ca_key_path=N
     return new_ca
 
 
-def _cert_covers(cert_path, hostnames, ips):
+def generate_crl(paths, config):
+    """Write a fresh (empty) CRL signed by the local CA, as .der and .pem."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    if not (os.path.exists(paths["ca"]) and os.path.exists(paths["ca_key"])):
+        return None
+    ca_key = _load_ca_key(paths["ca_key"])
+    if ca_key is None:
+        return None
+    with open(paths["ca"], "rb") as fh:
+        ca_cert = x509.load_pem_x509_certificate(fh.read())
+    now = datetime.datetime.now(datetime.timezone.utc)
+    crl = (
+        x509.CertificateRevocationListBuilder()
+        .issuer_name(ca_cert.subject)
+        .last_update(now - datetime.timedelta(days=1))
+        .next_update(now + datetime.timedelta(days=1825))
+        .sign(ca_key, hashes.SHA256())
+    )
+    with open(paths["crl"] + ".der", "wb") as fh:
+        fh.write(crl.public_bytes(serialization.Encoding.DER))
+    with open(paths["crl"] + ".pem", "wb") as fh:
+        fh.write(crl.public_bytes(serialization.Encoding.PEM))
+    return paths["crl"] + ".der"
+
+
+def build_ocsp_response(request_der, paths):
+    """Answer an OCSP request: GOOD for our leaf, UNKNOWN otherwise."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.x509 import ocsp
+    try:
+        req = ocsp.load_der_ocsp_request(request_der)
+    except Exception:  # noqa: BLE001
+        return None
+    ca_key = _load_ca_key(paths["ca_key"])
+    if ca_key is None or not os.path.exists(paths["ca"]):
+        return None
+    try:
+        with open(paths["ca"], "rb") as fh:
+            ca_cert = x509.load_pem_x509_certificate(fh.read())
+        with open(paths["cert"], "rb") as fh:
+            leaf = x509.load_pem_x509_certificate(fh.read())
+        now = datetime.datetime.now(datetime.timezone.utc)
+        status = ocsp.OCSPCertStatus.GOOD if req.serial_number == leaf.serial_number \
+            else ocsp.OCSPCertStatus.UNKNOWN
+        builder = ocsp.OCSPResponseBuilder()
+        builder = builder.add_response(
+            cert=leaf, issuer=ca_cert, algorithm=req.hash_algorithm, cert_status=status,
+            this_update=now, next_update=now + datetime.timedelta(days=7),
+            revocation_time=None, revocation_reason=None)
+        builder = builder.responder_id(ocsp.OCSPResponderEncoding.HASH, ca_cert)
+        return builder.sign(ca_key, hashes.SHA256()).public_bytes(serialization.Encoding.DER)
+    except Exception as exc:  # noqa: BLE001
+        log("OCSP response error: {}".format(exc))
+        try:
+            return ocsp.OCSPResponseBuilder.build_unsuccessful(
+                ocsp.OCSPResponseStatus.INTERNAL_ERROR).public_bytes(serialization.Encoding.DER)
+        except Exception:  # noqa: BLE001
+            return None
+
+
+def _cert_covers(cert_path, hostnames, ips, want_crl=False, want_ocsp=False):
     from cryptography import x509
     try:
         with open(cert_path, "rb") as fh:
@@ -401,23 +513,30 @@ def _cert_covers(cert_path, hostnames, ips):
         have_dns = set(san.get_values_for_type(x509.DNSName))
         have_ip = {str(x) for x in san.get_values_for_type(x509.IPAddress)}
         want_dns = set(hostnames) | {"localhost"}
-        return want_dns.issubset(have_dns) and set(ips).issubset(have_ip)
+        if not (want_dns.issubset(have_dns) and set(ips).issubset(have_ip)):
+            return False
+        has_crl = any(e.oid == x509.oid.ExtensionOID.CRL_DISTRIBUTION_POINTS for e in cert.extensions)
+        has_ocsp = any(e.oid == x509.oid.ExtensionOID.AUTHORITY_INFORMATION_ACCESS for e in cert.extensions)
+        return has_crl == bool(want_crl) and has_ocsp == bool(want_ocsp)
     except Exception:  # noqa: BLE001
         return False
 
 
-def ensure_certificates(paths):
-    """Ensure a leaf cert covering the configured hostnames + this LAN IP exists.
-    Re-issues the leaf (reusing the CA) when the hostname set changes."""
-    ca_key = paths.get("ca_key") or (paths["ca"] + ".key")
+def ensure_certificates(paths, config=None):
+    """Ensure a leaf cert covering the configured hostnames + LAN IP, plus the
+    configured revocation extensions, exists. Re-issues (reusing the CA) otherwise."""
+    config = config or {}
     want_ips = ["127.0.0.1"]
-    ip = detect_lan_ip()
+    ip = detect_lan_ip(config.get("intercept_ips"))
     if ip != "127.0.0.1":
         want_ips.append(ip)
-    if (os.path.exists(paths["cert"]) and os.path.exists(paths["key"])
-            and os.path.exists(paths["ca"]) and _cert_covers(paths["cert"], paths["hostnames"], want_ips)):
+    crl_urls, ocsp_url = revocation_urls(config, paths)
+    if (os.path.exists(paths["cert"]) and os.path.exists(paths["key"]) and os.path.exists(paths["ca"])
+            and _cert_covers(paths["cert"], paths["hostnames"], want_ips,
+                             want_crl=bool(crl_urls), want_ocsp=bool(ocsp_url))):
         return False
-    new_ca = generate_certificates(paths["cert"], paths["key"], paths["ca"], paths["hostnames"], ca_key)
+    new_ca = generate_certificates(paths["cert"], paths["key"], paths["ca"], paths["hostnames"],
+                                   paths.get("ca_key"), crl_urls=crl_urls, ocsp_url=ocsp_url)
     if new_ca:
         _trust_ca(paths["ca"])
     return True
@@ -949,6 +1068,20 @@ GUI_HTML = r"""<!DOCTYPE html>
       Makes the public resolver IPs local loopback addresses so any query to them hits this server,
       switches the forwarder to avoid a loop, and disables browser DoH. Requires the server to run as Administrator.
     </div>
+    <div class="row" style="margin-top:16px; align-items:center; gap:20px">
+      <span class="mut" style="font-size:12px">Certificate revocation (HTTPS clients):</span>
+      <label class="chk" style="display:flex; align-items:center; gap:6px; color:var(--txt); font-size:13px">
+        <input type="checkbox" id="revCrl" style="width:auto"> Serve CRL
+      </label>
+      <label class="chk" style="display:flex; align-items:center; gap:6px; color:var(--txt); font-size:13px">
+        <input type="checkbox" id="revOcsp" style="width:auto"> Serve OCSP
+      </label>
+      <span class="mut" id="revStatus" style="font-size:11px"></span>
+    </div>
+    <div class="mut" style="font-size:11px; margin-top:6px; line-height:1.5">
+      Toggle these to test how strict clients (e.g. curl) handle revocation. CRL covers Schannel;
+      OCSP is a responder at <code>/ocsp</code>. Changing either re-issues the cert and reloads HTTPS.
+    </div>
   </section>
 
   <section>
@@ -1102,6 +1235,9 @@ function load() {
     document.getElementById("ttl").value = cfg.ttl;
     document.getElementById("intercept").checked = !!cfg.intercept_enabled;
     document.getElementById("targets").value = (cfg.intercept_ips || []).join(", ");
+    document.getElementById("revCrl").checked = cfg.revocation_crl !== false;
+    document.getElementById("revOcsp").checked = cfg.revocation_ocsp === true;
+    document.getElementById("revStatus").textContent = "CRL " + (cfg.revocation_crl !== false ? "on" : "off") + " \u00b7 OCSP " + (cfg.revocation_ocsp === true ? "on" : "off");
     updateRecState(cfg.record_queries === true);
     const gui = cfg.tls && cfg.tls_port === 443 ? "https://" + cfg.hostname + "/" : "GUI :" + cfg.gui_port;
     document.getElementById("status").textContent = "v" + (cfg.version || "?") + " \u2022 listening :" + cfg.port + " \u2022 " + gui + (cfg.intercept_enabled ? " \u2022 OVERRIDE" : "") + (cfg.token_required ? " \u2022 token" : "");
@@ -1117,6 +1253,8 @@ function save() {
     ttl: parseInt(document.getElementById("ttl").value || "60", 10),
     intercept_enabled: document.getElementById("intercept").checked,
     intercept_ips: document.getElementById("targets").value,
+    revocation_crl: document.getElementById("revCrl").checked,
+    revocation_ocsp: document.getElementById("revOcsp").checked,
     records: fromRows()
   };
   fetch("/api/config" + q, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(payload) })
@@ -1396,6 +1534,8 @@ class GUIHandler(BaseHTTPRequestHandler):
             "intercept_enabled": bool(c.get("intercept_enabled", False)),
             "intercept_ips": c.get("intercept_ips") or list(DEFAULT_INTERCEPT_IPS),
             "record_queries": bool(c.get("record_queries", False)),
+            "revocation_crl": bool(c.get("revocation_crl", True)),
+            "revocation_ocsp": bool(c.get("revocation_ocsp", False)),
             "update_check": bool(c.get("update_check", True)),
             "version": VERSION,
             "records": c.get("records", {}),
@@ -1425,6 +1565,10 @@ class GUIHandler(BaseHTTPRequestHandler):
             c["intercept_ips"] = self._clean_ips(payload["intercept_ips"])
         if "record_queries" in payload:
             c["record_queries"] = bool(payload["record_queries"])
+        if "revocation_crl" in payload:
+            c["revocation_crl"] = bool(payload["revocation_crl"])
+        if "revocation_ocsp" in payload:
+            c["revocation_ocsp"] = bool(payload["revocation_ocsp"])
         c.setdefault("intercept_ips", list(DEFAULT_INTERCEPT_IPS))
         c.setdefault("intercept_upstream", "9.9.9.10")
         if "records" in payload:
@@ -1548,9 +1692,60 @@ class GUIHandler(BaseHTTPRequestHandler):
         log("record {} for {} via API".format("merged" if append else "replaced", name))
         self._json({"ok": True, "record": record_to_api(name, raw)})
 
+    # ---------- revocation (CRL / OCSP) ----------
+
+    def _serve_crl(self, path):
+        paths = resolve_paths(STATE.config, STATE.path)
+        if path == "/crl.pem":
+            file, ctype = paths["crl"] + ".pem", "application/x-pem-file"
+        else:
+            file, ctype = paths["crl"] + ".der", "application/pkix-crl"
+        if not os.path.exists(file):
+            self._empty(404)
+            return
+        with open(file, "rb") as fh:
+            self._send(200, fh.read(), ctype)
+
+    def _serve_ocsp(self, body):
+        if not STATE.config.get("revocation_ocsp", False):
+            self._empty(404)
+            return
+        paths = resolve_paths(STATE.config, STATE.path)
+        der = build_ocsp_response(body, paths)
+        if der is None:
+            self._empty(500)
+            return
+        self._send(200, der, "application/ocsp-response")
+
+    def _handle_revocation(self, path, query):
+        """Return True if the request was a CRL/OCSP fetch."""
+        if path in ("/crl", "/crl.der", "/crl.pem"):
+            self._serve_crl(path)
+            return True
+        if path == "/ocsp":
+            if self.command == "POST":
+                length = int(self.headers.get("Content-Length", 0))
+                self._serve_ocsp(self.rfile.read(length) if length else b"")
+            else:
+                # OCSP over GET: base64 of the request in the path or query
+                import base64
+                raw = path[len("/ocsp"):].lstrip("/")
+                if not raw:
+                    values = list(query.values())
+                    raw = values[0][0] if values and values[0] else ""
+                try:
+                    self._serve_ocsp(base64.b64decode(raw))
+                except Exception:  # noqa: BLE001
+                    self._empty(400)
+            return True
+        return False
+
     def do_GET(self):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
+        if parsed.path.startswith("/crl") or parsed.path == "/ocsp":
+            self._handle_revocation(parsed.path, query)
+            return
         if not self._auth_ok(query):
             self._empty(401)
             return
@@ -1603,6 +1798,9 @@ class GUIHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
+        if parsed.path == "/ocsp":
+            self._handle_revocation(parsed.path, query)
+            return
         if not self._auth_ok(query):
             self._empty(401)
             return
@@ -1617,6 +1815,7 @@ class GUIHandler(BaseHTTPRequestHandler):
                 return
             log("config updated via web GUI ({} override(s))".format(len(config.get("records", {}))))
             sync_interception(STATE.config)
+            refresh_crypto()
             self._json({"ok": True, "config": self._public_config()})
         elif parsed.path == "/api/notes":
             try:
@@ -1742,6 +1941,56 @@ class ThreadedGUI(ThreadingHTTPServer):
     daemon_threads = True
 
 
+TLS_GUI = None
+TLS_BIND = "0.0.0.0"
+TLS_PORT = 443
+
+
+def start_tls_server(config, paths):
+    """Create (or recreate) the HTTPS GUI listener with a fresh certificate."""
+    global TLS_GUI, TLS_BIND, TLS_PORT
+    if TLS_GUI is not None:
+        try:
+            TLS_GUI.shutdown()
+            TLS_GUI.server_close()
+        except Exception:  # noqa: BLE001
+            pass
+        TLS_GUI = None
+    TLS_BIND = config.get("gui_bind", "0.0.0.0")
+    TLS_PORT = int(config.get("gui_tls_port", 443))
+    ctx = make_ssl_context(paths["cert"], paths["key"])
+    gui = ThreadedGUI((TLS_BIND, TLS_PORT), GUIHandler)
+    gui.socket = ctx.wrap_socket(gui.socket, server_side=True)
+    threading.Thread(target=gui.serve_forever, daemon=True).start()
+    TLS_GUI = gui
+    return gui
+
+
+def refresh_crypto(reload_tls=True):
+    """Re-issue the cert/CRL as needed and (re)load the HTTPS listener."""
+    if STATE is None:
+        return
+    config = STATE.config
+    paths = resolve_paths(config, STATE.path)
+    try:
+        ensure_certificates(paths, config)
+    except Exception as exc:  # noqa: BLE001
+        log("certificate refresh failed: {}".format(exc))
+        return
+    if config.get("revocation_crl", True):
+        try:
+            generate_crl(paths, config)
+        except Exception as exc:  # noqa: BLE001
+            log("CRL generation failed: {}".format(exc))
+    if reload_tls and config.get("gui_tls", False):
+        try:
+            start_tls_server(config, paths)
+            log("HTTPS reloaded (CRL={}, OCSP={})".format(
+                config.get("revocation_crl", True), config.get("revocation_ocsp", False)))
+        except Exception as exc:  # noqa: BLE001
+            log("HTTPS reload failed: {}".format(exc))
+
+
 DEFAULT_CONFIG = {
     "upstream": "1.1.1.1",
     "upstream_port": 53,
@@ -1759,6 +2008,8 @@ DEFAULT_CONFIG = {
     "gui_ca": "dns.settings-ca.crt",
     "gui_ca_key": "dns.settings-ca.key",
     "gui_token": None,
+    "revocation_crl": True,
+    "revocation_ocsp": False,
     "intercept_enabled": False,
     "intercept_ips": list(DEFAULT_INTERCEPT_IPS),
     "intercept_upstream": "9.9.9.10",
@@ -1853,7 +2104,9 @@ def main():
 
     if args.ensure_cert:
         try:
-            created = ensure_certificates(paths)
+            created = ensure_certificates(paths, config)
+            if config.get("revocation_crl", True):
+                generate_crl(paths, config)
         except Exception as exc:
             log("certificate generation failed: {}".format(exc))
             sys.exit(1)
@@ -1917,18 +2170,19 @@ def main():
 
         if config.get("gui_tls", False):
             try:
-                created = ensure_certificates(paths)
+                created = ensure_certificates(paths, config)
                 if created:
-                    log("generated TLS certificate for {}".format(", ".join(paths["hostnames"])))
-                tls_port = int(config.get("gui_tls_port", 443))
-                ctx = make_ssl_context(paths["cert"], paths["key"])
-                gui = ThreadedGUI((gui_bind, tls_port), GUIHandler)
-                gui.socket = ctx.wrap_socket(gui.socket, server_side=True)
-                threading.Thread(target=gui.serve_forever, daemon=True).start()
+                    log("issued TLS certificate for {}".format(", ".join(paths["hostnames"])))
+                if config.get("revocation_crl", True):
+                    generate_crl(paths, config)
+                gui = start_tls_server(config, paths)
                 gui_servers.append(gui)
                 host = paths["hostnames"][0] if paths["hostnames"] else "127.0.0.1"
+                tls_port = int(config.get("gui_tls_port", 443))
                 url_host = host if tls_port == 443 else "{}:{}".format(host, tls_port)
                 log("web GUI: https://{}/{}".format(url_host, suffix))
+                log("revocation: CRL={} OCSP={}".format(
+                    config.get("revocation_crl", True), config.get("revocation_ocsp", False)))
             except Exception as exc:
                 log("could not start HTTPS GUI -> {}".format(exc))
 

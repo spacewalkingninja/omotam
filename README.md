@@ -131,6 +131,15 @@ When installed, Omotam adds an icon in the notification area (started at logon b
 
 Turn it off with `-NoTray` at install time, or delete the `omotam-tray` task.
 
+## Certificate revocation (CRL / OCSP)
+
+Strict Windows clients (Schannel, e.g. `curl.exe`) refuse a locally-issued cert unless it has a revocation path (`CRYPT_E_NO_REVOCATION_CHECK`). Omotam solves this by serving its own revocation info over plain HTTP (port `gui_port`):
+
+- **CRL (on by default):** the cert advertises a CRL Distribution Point (`http://<host>:8080/crl`) and Omotam serves a signed, empty CRL (DER + PEM).
+- **OCSP (off by default):** the cert advertises an OCSP responder and Omotam answers `POST /ocsp`.
+
+Both are togglable in the GUI (**Server → Certificate revocation**); changing a toggle re-issues the cert and reloads HTTPS live. With the CRL on, `curl https://<name>` succeeds with **no flags**. Browsers/`.NET` work either way.
+
 ## Updates
 
 Omotam checks the GitHub releases feed in the background (every 6h by default, `update_check` / `update_check_hours`). When a newer version exists:
@@ -149,6 +158,7 @@ Update now stops the service, downloads the latest release, replaces the program
 | `ttl` | TTL for custom answers |
 | `gui_enabled`, `gui_bind`, `gui_port` | Web GUI (HTTP) |
 | `gui_tls`, `gui_tls_port`, `gui_hostname` | HTTPS + the name(s) it serves. `gui_hostname` may be a single name or a list (e.g. `["dns.settings","omotam.example.com"]`); the cert is re-issued automatically when the list changes |
+| `revocation_crl`, `revocation_ocsp` | Advertise a CRL distribution point (default **on**) and/or an OCSP responder (default off) in the cert; togglable in the GUI |
 | `gui_token`, `api_token` | Require auth when set |
 | `intercept_enabled`, `intercept_ips`, `intercept_upstream` | Override mode |
 | `record_queries` | Record DNS requests (default **false**) |
