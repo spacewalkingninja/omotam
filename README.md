@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="Omotam" width="420">
+<img src="assets/logo.svg?v=2" alt="Omotam" width="420">
 
 # Omotam
 
