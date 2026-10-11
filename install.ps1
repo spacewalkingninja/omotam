@@ -88,9 +88,14 @@ function Set-OmotamMcpConfig($dir) {
     }
     if (Test-Path -LiteralPath $cfgPath) {
         $raw = Get-Content -LiteralPath $cfgPath -Raw
-        $stripped = [Regex]::Replace($raw, '(?m)//.*$', '')
-        $stripped = [Regex]::Replace($stripped, '(?s)/\*.*?\*/', '')
-        $obj = $stripped.Trim() | ConvertFrom-Json
+        try {
+            $obj = $raw | ConvertFrom-Json
+        } catch {
+            # only strip whole-line // comments and /* */ blocks (never inline, to keep URLs intact)
+            $stripped = [Regex]::Replace($raw, '(?m)^\s*//.*$', '')
+            $stripped = [Regex]::Replace($stripped, '(?s)/\*.*?\*/', '')
+            $obj = $stripped | ConvertFrom-Json
+        }
         if (-not $obj.PSObject.Properties['mcp']) {
             $obj | Add-Member -NotePropertyName mcp -NotePropertyValue ([pscustomobject]@{})
         }
