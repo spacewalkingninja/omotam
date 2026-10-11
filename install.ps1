@@ -170,7 +170,17 @@ function Invoke-OmotamInstall($opts, $status) {
     $tlsPort = if ($config.gui_tls_port) { [int]$config.gui_tls_port } else { 443 }
 
     & $status "Opening firewall ..."
+    # migrate/clean any legacy (pre-Omotam) install so port 53 isn't contested
+    foreach ($lt in 'CustomDNS') {
+        if (Get-ScheduledTask -TaskName $lt -ErrorAction SilentlyContinue) {
+            Stop-ScheduledTask -TaskName $lt -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $lt -Confirm:$false
+        }
+    }
     if ($opts.Firewall) {
+        foreach ($ln in 'Custom DNS (UDP)', 'Custom DNS (TCP)', 'Custom DNS GUI (HTTP)', 'Custom DNS GUI (HTTPS)') {
+            if (Get-NetFirewallRule -DisplayName $ln -ErrorAction SilentlyContinue) { Remove-NetFirewallRule -DisplayName $ln }
+        }
         Add-FirewallRule 'omotam DNS (UDP)' 'UDP' $dnsPort
         Add-FirewallRule 'omotam DNS (TCP)' 'TCP' $dnsPort
         Add-FirewallRule 'omotam GUI (HTTP)' 'TCP' $guiPort
