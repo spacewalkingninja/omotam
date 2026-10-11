@@ -28,6 +28,7 @@
 - Optional **override mode**: make public resolvers (`1.1.1.1`, `8.8.8.8`, …) answer from this server on the host machine.
 - Optional **query recording**: **Start Recording** / **End Recording** in the GUI, filter by timeframe, export CSV/JSON. *(Off by default.)*
 - **Self-update**: checks GitHub for new releases and sends a Windows notification, with one-click **Update now**.
+- **System tray icon**: shows **Omotam on / off**, double-click opens the UI, right-click has service controls and settings.
 
 ## Install
 
@@ -119,6 +120,16 @@ opencode config:
 ```
 
 Add `"DNS_API_TOKEN": "<token>"` to `env` if you set an API token.
+
+## Tray icon
+
+When installed, Omotam adds an icon in the notification area (started at logon by the scheduled task `omotam-tray`):
+
+- **Green** = running (**Omotam on**), **red** = stopped (**Omotam off**).
+- **Double-click** opens the web UI.
+- **Right-click** opens the menu: Open Omotam / Open control panel, Start · Restart · Stop service, and **Settings** (Start recording, End recording, Check for updates, Open config file, Open data folder), plus Exit tray.
+
+Turn it off with `-NoTray` at install time, or delete the `omotam-tray` task.
 
 ## Updates
 
