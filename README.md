@@ -148,7 +148,7 @@ Update now stops the service, downloads the latest release, replaces the program
 | `port`, `bind` | DNS listener (53, `0.0.0.0`) |
 | `ttl` | TTL for custom answers |
 | `gui_enabled`, `gui_bind`, `gui_port` | Web GUI (HTTP) |
-| `gui_tls`, `gui_tls_port`, `gui_hostname` | HTTPS + the name it serves |
+| `gui_tls`, `gui_tls_port`, `gui_hostname` | HTTPS + the name(s) it serves. `gui_hostname` may be a single name or a list (e.g. `["dns.settings","omotam.example.com"]`); the cert is re-issued automatically when the list changes |
 | `gui_token`, `api_token` | Require auth when set |
 | `intercept_enabled`, `intercept_ips`, `intercept_upstream` | Override mode |
 | `record_queries` | Record DNS requests (default **false**) |

@@ -13,6 +13,7 @@
   "gui_cert": "dns.settings.crt",
   "gui_key": "dns.settings.key",
   "gui_ca": "dns.settings-ca.crt",
+  "gui_ca_key": "dns.settings-ca.key",
   "gui_token": null,
   "api_token": null,
   "intercept_enabled": false,

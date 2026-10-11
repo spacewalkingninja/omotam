@@ -253,7 +253,7 @@ function Invoke-OmotamUninstall($status) {
     }
     $hosts = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
     [System.IO.File]::WriteAllLines($hosts, ((Get-Content -LiteralPath $hosts) | Where-Object { $_ -notmatch '\bdns\.settings\b' }), (New-Object System.Text.UTF8Encoding($false)))
-    foreach ($c in (Get-ChildItem 'Cert:\LocalMachine\Root' | Where-Object { $_.Subject -like '*Custom DNS Local CA*' })) {
+    foreach ($c in (Get-ChildItem 'Cert:\LocalMachine\Root' | Where-Object { $_.Subject -like '*Omotam Local CA*' -or $_.Subject -like '*Custom DNS Local CA*' })) {
         Remove-Item -LiteralPath $c.PSPath -Force -ErrorAction SilentlyContinue
     }
     & $status "Removing files ..."

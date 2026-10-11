@@ -49,7 +49,7 @@ LOG_TOTAL = 0
 QUERY_LOG = collections.deque(maxlen=50000)
 QUERY_LOCK = threading.Lock()
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 REPO = "spacewalkingninja/omotam"
 UPDATE_CACHE = {"ts": 0.0, "result": None}
 UPDATE_LOCK = threading.Lock()
@@ -286,34 +286,80 @@ def resolve_paths(config, config_path):
         "cert": rp(config.get("gui_cert", "dns.settings.crt")),
         "key": rp(config.get("gui_key", "dns.settings.key")),
         "ca": rp(config.get("gui_ca", "dns.settings-ca.crt")),
+        "ca_key": rp(config.get("gui_ca_key", "dns.settings-ca.key")),
     }
 
 
-def generate_certificates(cert_path, key_path, ca_path, hostnames):
-    """Create a local CA and a leaf cert (chained) for the given hostnames."""
+def _load_ca_key(ca_key_path):
+    from cryptography.hazmat.primitives import serialization
+    if not os.path.exists(ca_key_path):
+        return None
+    try:
+        with open(ca_key_path, "rb") as fh:
+            return serialization.load_pem_private_key(fh.read(), password=None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _trust_ca(ca_path):
+    """Best-effort: add the local CA to this machine's Trusted Root store."""
+    if os.name != "nt":
+        return
+    try:
+        safe = ca_path.replace("'", "''")
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Import-Certificate -FilePath '{}' -CertStoreLocation 'Cert:\\LocalMachine\\Root' | Out-Null".format(safe)],
+            capture_output=True, timeout=30)
+        if proc.returncode == 0:
+            log("trusted local CA: {}".format(ca_path))
+        else:
+            log("could not trust CA automatically; run as Administrator or import {} manually".format(ca_path))
+    except Exception as exc:  # noqa: BLE001
+        log("could not trust CA automatically (import it manually): {}".format(exc))
+
+
+def generate_certificates(cert_path, key_path, ca_path, hostnames, ca_key_path=None):
+    """Issue a leaf cert (chained to a local CA) for the hostnames.
+
+    Reuses an existing CA key/cert when present so trust is preserved.
+    Returns True when a brand-new CA was created."""
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
 
+    if ca_key_path is None:
+        ca_key_path = ca_path + ".key"
+
+    pem = serialization.Encoding.PEM
     now = datetime.datetime.now(datetime.timezone.utc)
-    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Custom DNS Local CA")])
-    ca_cert = (
-        x509.CertificateBuilder()
-        .subject_name(ca_name)
-        .issuer_name(ca_name)
-        .public_key(ca_key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - datetime.timedelta(days=1))
-        .not_valid_after(now + datetime.timedelta(days=3650))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .add_extension(
-            x509.KeyUsage(True, False, False, False, False, True, True, False, False),
-            critical=True,
+    ca_key = _load_ca_key(ca_key_path) if os.path.exists(ca_path) else None
+    new_ca = ca_key is None
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Omotam Local CA")])
+
+    if new_ca:
+        ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        with open(ca_key_path, "wb") as fh:
+            fh.write(ca_key.private_bytes(pem, serialization.PrivateFormat.PKCS8,
+                                          serialization.NoEncryption()))
+        ca_cert = (
+            x509.CertificateBuilder()
+            .subject_name(ca_name).issuer_name(ca_name)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=3650))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .add_extension(x509.KeyUsage(True, False, False, False, False, True, True, False, False), critical=True)
+            .sign(ca_key, hashes.SHA256())
         )
-        .sign(ca_key, hashes.SHA256())
-    )
+        with open(ca_path, "wb") as fh:
+            fh.write(ca_cert.public_bytes(pem))
+    else:
+        with open(ca_path, "rb") as fh:
+            ca_cert = x509.load_pem_x509_certificate(fh.read())
+        ca_name = ca_cert.subject
 
     leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostnames[0])])
@@ -327,39 +373,53 @@ def generate_certificates(cert_path, key_path, ca_path, hostnames):
         san_ips.append(x509.IPAddress(ipaddress.ip_address(ip)))
     leaf_cert = (
         x509.CertificateBuilder()
-        .subject_name(leaf_name)
-        .issuer_name(ca_name)
+        .subject_name(leaf_name).issuer_name(ca_name)
         .public_key(leaf_key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=825))
         .add_extension(x509.SubjectAlternativeName(san_names + san_ips), critical=False)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(
-            x509.KeyUsage(True, False, True, False, False, False, False, False, False),
-            critical=True,
-        )
+        .add_extension(x509.KeyUsage(True, False, True, False, False, False, False, False, False), critical=True)
         .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
         .sign(ca_key, hashes.SHA256())
     )
-
-    pem = serialization.Encoding.PEM
     with open(cert_path, "wb") as fh:
         fh.write(leaf_cert.public_bytes(pem))
         fh.write(ca_cert.public_bytes(pem))
     with open(key_path, "wb") as fh:
-        fh.write(
-            leaf_key.private_bytes(pem, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
-        )
-    with open(ca_path, "wb") as fh:
-        fh.write(ca_cert.public_bytes(pem))
-    return cert_path, key_path, ca_path
+        fh.write(leaf_key.private_bytes(pem, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    return new_ca
+
+
+def _cert_covers(cert_path, hostnames, ips):
+    from cryptography import x509
+    try:
+        with open(cert_path, "rb") as fh:
+            cert = x509.load_pem_x509_certificate(fh.read())
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        have_dns = set(san.get_values_for_type(x509.DNSName))
+        have_ip = {str(x) for x in san.get_values_for_type(x509.IPAddress)}
+        want_dns = set(hostnames) | {"localhost"}
+        return want_dns.issubset(have_dns) and set(ips).issubset(have_ip)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def ensure_certificates(paths):
-    if os.path.exists(paths["cert"]) and os.path.exists(paths["key"]):
+    """Ensure a leaf cert covering the configured hostnames + this LAN IP exists.
+    Re-issues the leaf (reusing the CA) when the hostname set changes."""
+    ca_key = paths.get("ca_key") or (paths["ca"] + ".key")
+    want_ips = ["127.0.0.1"]
+    ip = detect_lan_ip()
+    if ip != "127.0.0.1":
+        want_ips.append(ip)
+    if (os.path.exists(paths["cert"]) and os.path.exists(paths["key"])
+            and os.path.exists(paths["ca"]) and _cert_covers(paths["cert"], paths["hostnames"], want_ips)):
         return False
-    generate_certificates(paths["cert"], paths["key"], paths["ca"], paths["hostnames"])
+    new_ca = generate_certificates(paths["cert"], paths["key"], paths["ca"], paths["hostnames"], ca_key)
+    if new_ca:
+        _trust_ca(paths["ca"])
     return True
 
 
@@ -1697,6 +1757,7 @@ DEFAULT_CONFIG = {
     "gui_cert": "dns.settings.crt",
     "gui_key": "dns.settings.key",
     "gui_ca": "dns.settings-ca.crt",
+    "gui_ca_key": "dns.settings-ca.key",
     "gui_token": None,
     "intercept_enabled": False,
     "intercept_ips": list(DEFAULT_INTERCEPT_IPS),

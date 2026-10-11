@@ -46,7 +46,7 @@ $lines = Get-Content -LiteralPath $hosts
 $kept = $lines | Where-Object { $_ -notmatch '\bdns\.settings\b' }
 if ($kept.Count -ne $lines.Count) { [System.IO.File]::WriteAllLines($hosts, $kept, (New-Object System.Text.UTF8Encoding($false))); Write-Host "Removed 'dns.settings' from hosts." }
 
-foreach ($c in (Get-ChildItem 'Cert:\LocalMachine\Root' | Where-Object { $_.Subject -like '*Custom DNS Local CA*' })) {
+foreach ($c in (Get-ChildItem 'Cert:\LocalMachine\Root' | Where-Object { $_.Subject -like '*Omotam Local CA*' -or $_.Subject -like '*Custom DNS Local CA*' })) {
     Remove-Item -LiteralPath $c.PSPath -Force -ErrorAction SilentlyContinue
     Write-Host "Removed trusted CA $($c.Thumbprint)."
 }
